@@ -11,7 +11,7 @@
 ┌─────────────────────────────────────────────────────────┐
 │  Layer 1: Extraction (Gemini LLM → Structured JSON)     │
 ├─────────────────────────────────────────────────────────┤
-│  Layer 2: Embedding (BGE-large-en-v1.5 → 1024-d vecs)  │
+│  Layer 2: Embedding (BGE-large-en-v1.5 → 1024-d vecs)   │
 ├─────────────────────────────────────────────────────────┤
 │  Layer 3: Storage (Qdrant vector DB + PostgreSQL)       │
 ├─────────────────────────────────────────────────────────┤
