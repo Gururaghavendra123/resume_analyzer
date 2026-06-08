@@ -250,4 +250,5 @@ pytest tests/ -v --cov=core
 
 ## 📝 License
 
-MIT
+MIT 
+done by Gururaghavendra and leksia
