@@ -2,13 +2,36 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { listResumes, listJDs, healthCheck } from '@/api/client';
+import { listResumes, listJDs, healthCheck, flushAllData } from '@/api/client';
 
 export default function DashboardPage() {
   const [resumes, setResumes] = useState([]);
   const [jds, setJds] = useState([]);
   const [apiStatus, setApiStatus] = useState('checking');
   const [loading, setLoading] = useState(true);
+  const [flushing, setFlushing] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  const handleFlush = async () => {
+    if (!window.confirm('⚠️ This will DELETE all resumes, JDs, match results, and vectors. Are you sure?')) return;
+    setFlushing(true);
+    try {
+      const result = await flushAllData();
+      const s = result.summary;
+      showToast(`✅ Flushed: ${s.resumes_deleted} resumes, ${s.jds_deleted} JDs, ${s.matches_deleted} matches`);
+      setResumes([]);
+      setJds([]);
+    } catch (err) {
+      showToast('❌ Flush failed: ' + (err?.response?.data?.detail || err.message), 'error');
+    } finally {
+      setFlushing(false);
+    }
+  };
 
   useEffect(() => {
     async function fetchData() {
@@ -43,9 +66,15 @@ export default function DashboardPage() {
 
   return (
     <div className="fade-in">
-      <div className="page-header">
-        <h1>Dashboard</h1>
-        <p>AI-powered resume matching at a glance</p>
+      <div className="page-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+        <div>
+          <h1>Dashboard</h1>
+          <p>AI-powered resume matching at a glance</p>
+        </div>
+        <button id="btn-flush-data" onClick={handleFlush} disabled={flushing}
+          className="btn btn-danger btn-sm" style={{ marginTop: 44 }}>
+          {flushing ? '⏳ Flushing...' : '🗑 Flush All Data'}
+        </button>
       </div>
 
       {/* ── Stats Grid ─────────────────────────────── */}
@@ -185,6 +214,12 @@ export default function DashboardPage() {
           ))}
         </div>
       </div>
+
+      {toast && (
+        <div className={`toast ${toast.type}`}>
+          {toast.type === 'success' ? '✓' : '✗'} {toast.message}
+        </div>
+      )}
     </div>
   );
 }

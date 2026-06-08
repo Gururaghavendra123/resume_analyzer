@@ -877,3 +877,118 @@ The BGE model maps text to a 1024-dimensional hypersphere. Key properties:
 
 > [!TIP]
 > **For interviews:** Always structure your answers as: (1) What the component does, (2) Why it was designed that way, (3) What the trade-offs are, (4) What you'd change at scale. This shows depth beyond just "I used X."
+
+---
+
+## 13. Phase 0+1 Additions (Post-MVP)
+
+These features were added after the initial MVP to improve reliability, performance, and portfolio polish.
+
+### 13.1 API Key Round-Robin (`APIKeyRotator`)
+
+**File:** `backend/core/extractor.py`
+
+**Problem:** Free-tier Gemini API keys have a 15 RPM (requests per minute) limit. Processing 10+ resumes sequentially exhausts the quota in under a minute, causing `429 Too Many Requests` errors.
+
+**Solution:** The `APIKeyRotator` class accepts multiple comma-separated keys via `GOOGLE_API_KEYS` and cycles through them:
+
+```
+Key #1 → 429 → rotate to Key #2 → 429 → rotate to Key #3 → success
+```
+
+**How it works:**
+1. `itertools.cycle` creates an infinite round-robin iterator over key indices
+2. On each API call, `call_with_rotation()` calls `genai.configure(api_key=current_key)` before `model.generate_content()`
+3. If the response is a 429/quota error (detected by checking the exception string for "429", "quota", or "rate"), it advances to the next key
+4. If ALL keys fail, it raises `ExtractionError` with the last error message
+5. Falls back gracefully to a single key if `GOOGLE_API_KEYS` is empty
+
+**Interview answer:** "I implemented a round-robin API key rotator because free-tier Gemini has a 15 RPM limit. The rotator uses `itertools.cycle` to cycle through N keys, catching 429 errors and auto-advancing. This gives N×15 RPM throughput without any external load balancer. The trade-off is that key rotation is process-local (not shared across workers), but for a single Celery worker with `pool=solo`, that's sufficient."
+
+### 13.2 Batch Extraction
+
+**File:** `backend/core/extractor.py` — `batch_extract()` method
+
+**Problem:** Each `process_resume` Celery task makes a separate Gemini API call. With 10 resumes, that's 10 API calls, each taking 10-20 seconds.
+
+**Solution:** `batch_extract(texts, batch_size=4)` packs multiple resume texts into a single prompt separated by `===RESUME_SEPARATOR===` markers, and asks Gemini to return a JSON array of structured objects.
+
+**Key design decisions:**
+- Default batch size of 4 (not 10) to stay within Gemini's output token limit
+- Automatic fallback: if batch parsing fails, each resume is extracted individually
+- The separator is a unique string unlikely to appear in any resume
+
+### 13.3 PDF Export Engine
+
+**File:** `backend/core/pdf_export.py`
+
+**Problem:** Match results only existed as JSON in the browser. Users needed downloadable reports for stakeholders.
+
+**Solution:** `generate_match_report_pdf()` uses ReportLab to create a professional A4 PDF with:
+- Executive summary table (all candidates at a glance)
+- Per-candidate detail: score bars, skill breakdowns, red flags, recommendations
+- Color-coded grades (A=green, B=blue, C=yellow, D=orange, F=red)
+- **Print-friendly colors** — dark text on white background (not the dark theme from the frontend)
+
+**Endpoint:** `GET /api/match/export/{job_id}/pdf` — returns `application/pdf` with `Content-Disposition: attachment`
+
+### 13.4 Admin Flush Endpoint
+
+**File:** `backend/api/routes/admin.py`
+
+**Endpoint:** `DELETE /api/admin/flush`
+
+Wipes ALL data in one atomic call:
+1. PostgreSQL: `DELETE FROM match_results, job_descriptions, resumes` (order matters for foreign keys)
+2. Qdrant: Deletes and recreates both vector collections
+3. Redis: `FLUSHDB` to clear Celery queue
+4. Filesystem: Deletes all files in `./uploads/`
+
+This was critical for development — stale data from previous runs caused confusing match results.
+
+### 13.5 Ontology Expansion
+
+**File:** `backend/core/ontology.py`
+
+Expanded from 78 nodes / ~80 edges to **237 nodes / 246 edges**. Added complete coverage for:
+- DevOps (Kubernetes → Docker → Linux)
+- Data Science (Pandas → NumPy → Python)
+- Cloud (AWS Lambda → AWS → Cloud)
+- Frontend frameworks (Next.js → React → JavaScript)
+- ML/AI (Transformers → PyTorch → Deep Learning → Machine Learning → Python)
+
+### 13.6 Frontend Enhancements
+
+**File:** `frontend/src/app/match/page.js`
+
+- **Radar/Spider Chart:** Pure SVG, no D3 or Chart.js dependency. Plots skills/experience/education/projects on 4 axes
+- **Animated Score Counter:** `requestAnimationFrame` + cubic ease-out interpolation
+- **5-Step Progress Bar:** Visual pipeline indicator (Extracting → Searching → Scoring → Explaining → Saving)
+- **Expandable Candidate Cards:** Click to reveal skill pills (matched/partial/missing), red flags, AI recommendation
+- **PDF Download Button:** Direct link to the export endpoint
+
+### 13.7 Resilient JSON Parsing
+
+**File:** `backend/core/extractor.py` — `safe_json_parse()`
+
+**Problem:** Gemini sometimes appends trailing garbage (markdown fences, explanatory text) after the JSON object, causing `json.loads()` to throw "Extra data" errors.
+
+**Solution:** Two-stage parser:
+1. First try `json.loads()` (strict)
+2. On "Extra data" error, fall back to `json.JSONDecoder().raw_decode()` which parses the first valid JSON object and ignores everything after it
+
+---
+
+### Additional Interview Questions (Phase 0+1)
+
+**Q20: How would you handle API key rotation across multiple Celery workers?**
+
+> With `pool=solo` (single worker), the `APIKeyRotator` lives in-process and works perfectly. For multiple workers, you'd need a shared rotation mechanism — either a Redis-backed atomic counter (`INCR api_key_index % num_keys`) or a dedicated rate-limiting proxy like LiteLLM that manages keys centrally.
+
+**Q21: Why ReportLab instead of WeasyPrint or FPDF for PDF generation?**
+
+> ReportLab is the most mature Python PDF library. It gives pixel-level control over layout via Flowables (Paragraph, Table, HRFlowable). WeasyPrint converts HTML→PDF which is easier but doesn't give precise table column control. FPDF2 is simpler but lacks the rich Table styling we needed for the grade-color-coded executive summary. The trade-off is ReportLab's verbose API, but for a structured report with fixed layout, it's ideal.
+
+**Q22: Your batch extraction uses a separator string. What if a resume contains that separator?**
+
+> The separator `===RESUME_SEPARATOR===` is designed to be unique enough that no real resume would contain it. As a defense-in-depth measure, the batch method includes automatic fallback — if the batch parse fails for any reason, each resume is re-extracted individually. In production, I'd add a pre-check that escapes or rejects inputs containing the separator.

@@ -95,6 +95,12 @@ class Scorer:
 
         resume_skill_names = [s.name.lower().strip() for s in resume.skills]
 
+        logger.info("=" * 60)
+        logger.info("[SKILL SCORING] Starting — %d JD requirements vs %d resume skills",
+                     len(jd.requirements), len(resume.skills))
+        logger.info("[RESUME SKILLS] %s", ", ".join(s.name for s in resume.skills))
+        logger.info("-" * 60)
+
         for req in jd.requirements:
             req_lower = req.skill.lower().strip()
 
@@ -102,6 +108,7 @@ class Scorer:
             direct = any(req_lower == s for s in resume_skill_names)
             if direct:
                 matched.append(req.skill)
+                logger.info("[SKILL MATCH] '%s' → TIER 1 EXACT MATCH ✅", req.skill)
                 continue
 
             # Tier 2: Substring / contains match
@@ -112,7 +119,12 @@ class Scorer:
                 for s in resume_skill_names
             )
             if substring_match:
+                matching_skill = next(
+                    (s for s in resume_skill_names if req_lower in s or s in req_lower), "?"
+                )
                 matched.append(req.skill)
+                logger.info("[SKILL MATCH] '%s' → TIER 2 SUBSTRING ✅ (found in '%s')",
+                           req.skill, matching_skill)
                 continue
 
             # Tier 3: Ontology match
@@ -121,6 +133,8 @@ class Scorer:
             )
             if implied:
                 partial.append(f"{req.skill} (inferred from {implied})")
+                logger.info("[SKILL MATCH] '%s' → TIER 3 ONTOLOGY ✅ (inferred from '%s')",
+                           req.skill, implied)
                 continue
 
             # Tier 4: Semantic similarity fallback (lowered threshold)
@@ -130,19 +144,32 @@ class Scorer:
                 )
                 if sim > 0.70:
                     partial.append(f"{req.skill} (~{int(sim * 100)}% semantic match)")
+                    logger.info("[SKILL MATCH] '%s' → TIER 4 SEMANTIC %d%% ✅",
+                               req.skill, int(sim * 100))
                     continue
+                else:
+                    logger.info("[SKILL MATCH] '%s' → TIER 4 SEMANTIC %d%% (below 70%% threshold)",
+                               req.skill, int(sim * 100))
             except Exception:
                 pass  # Embedding failure shouldn't block scoring
 
             # Not matched
             if req.is_required:
                 missing.append(req.skill)
+                logger.info("[SKILL MATCH] '%s' → ❌ MISSING (required)", req.skill)
+            else:
+                logger.info("[SKILL MATCH] '%s' → ❌ NOT FOUND (preferred, not penalized)", req.skill)
 
         # Calculate score — no additional penalty needed.
         # Missing skills are already reflected by not appearing in matched/partial.
         total_reqs = max(len(jd.requirements), 1)
         score = (len(matched) + 0.5 * len(partial)) / total_reqs
         score = max(0.0, min(1.0, score))
+
+        logger.info("-" * 60)
+        logger.info("[SKILL SCORE] %d matched + %d partial + %d missing / %d total = %.0f%%",
+                     len(matched), len(partial), len(missing), total_reqs, score * 100)
+        logger.info("=" * 60)
 
         notes_parts: list[str] = []
         if matched:

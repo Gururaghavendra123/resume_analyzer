@@ -57,3 +57,7 @@ backend/db/migrations/versions/*.pyc
 
 # Uploads (runtime data)
 uploads/
+backend/uploads/
+
+# Gemini IDE
+.gemini/

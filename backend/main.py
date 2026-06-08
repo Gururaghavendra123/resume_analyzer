@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.middleware import LoggingMiddleware
 from api.routes import resume, jd, match
+from api.routes import admin as admin_routes
 from config import get_settings
 from db.postgres import init_db, close_db
 
@@ -99,6 +100,7 @@ app.add_middleware(LoggingMiddleware)
 app.include_router(resume.router, prefix="/api/resume", tags=["Resumes"])
 app.include_router(jd.router, prefix="/api/jd", tags=["Job Descriptions"])
 app.include_router(match.router, prefix="/api/match", tags=["Matching"])
+app.include_router(admin_routes.router, prefix="/api/admin", tags=["Admin"])
 
 
 # ── Health Check ───────────────────────────────────────────────

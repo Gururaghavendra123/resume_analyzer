@@ -127,6 +127,17 @@ export async function exportMatchResults(jobId) {
   return res.data;
 }
 
+export function getMatchPdfUrl(jobId) {
+  return `${API_BASE_URL}/api/match/export/${jobId}/pdf`;
+}
+
+// ── Admin APIs ──────────────────────────────────────────────────
+
+export async function flushAllData() {
+  const res = await api.delete('/api/admin/flush');
+  return res.data;
+}
+
 // ── Health ──────────────────────────────────────────────────────
 
 export async function healthCheck() {

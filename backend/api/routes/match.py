@@ -6,6 +6,7 @@ Endpoints:
 - GET  /api/match/results/{job_id}     → Poll async match job status/results
 - GET  /api/match/{resume_id}/{jd_id}  → Get specific match result
 - GET  /api/match/export/{job_id}      → Export results as JSON
+- GET  /api/match/export/{job_id}/pdf  → Export results as PDF report
 """
 
 import json
@@ -149,5 +150,57 @@ async def export_match_results(
         },
         headers={
             "Content-Disposition": f"attachment; filename=match_results_{job_id}.json"
+        },
+    )
+
+
+@router.get("/export/{job_id}/pdf")
+async def export_match_results_pdf(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Export match results as a downloadable professional PDF report."""
+    from fastapi.responses import Response
+    from db.postgres import JDRecord
+    from core.pdf_export import generate_match_report_pdf
+
+    # Load match records
+    result = await db.execute(
+        select(MatchRecord)
+        .where(MatchRecord.job_id == job_id)
+        .order_by(MatchRecord.overall_score.desc())
+    )
+    records = result.scalars().all()
+
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No results found for job '{job_id}'",
+        )
+
+    results = [record.get_result() for record in records]
+
+    # Try to get JD title for the cover page
+    jd_title = "Job Description"
+    jd_id = results[0].get("jd_id") if results else None
+    if jd_id:
+        jd_result = await db.execute(select(JDRecord).where(JDRecord.id == jd_id))
+        jd_record = jd_result.scalar_one_or_none()
+        if jd_record and jd_record.title:
+            jd_title = jd_record.title
+
+    # Generate PDF
+    try:
+        pdf_bytes = generate_match_report_pdf(results, jd_title=jd_title, job_id=job_id)
+    except Exception as e:
+        logger.error("PDF generation failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename=match_report_{job_id[:8]}.pdf",
+            "Content-Length": str(len(pdf_bytes)),
         },
     )

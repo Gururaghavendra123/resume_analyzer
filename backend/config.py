@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # ── LLM — Google Gemini ────────────────────────────────────
     google_api_key: str = ""
+    google_api_keys: str = ""  # comma-separated keys for round-robin
     extraction_model: str = "gemini-2.0-flash"
 
     # ── Embedding ──────────────────────────────────────────────

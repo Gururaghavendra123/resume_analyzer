@@ -38,7 +38,7 @@ The system has 5 distinct layers. Every feature, every function, every module be
 │  LAYER 2: Embedding                                             │
 │  Input: Structured JSON fields                                  │
 │  Output: Dense vector representations per section               │
-│  Tech: sentence-transformers (BAAI/bge-large-en-v1.5)          │
+│  Tech: sentence-transformers (BAAI/bge-large-en-v1.5)           │
 ├─────────────────────────────────────────────────────────────────┤
 │  LAYER 3: Storage & Retrieval                                   │
 │  Input: Embeddings + metadata                                   │
@@ -52,7 +52,7 @@ The system has 5 distinct layers. Every feature, every function, every module be
 ├─────────────────────────────────────────────────────────────────┤
 │  LAYER 5: Explainability                                        │
 │  Input: Score breakdown                                         │
-│  Output: Human-readable match report with reasons              │
+│  Output: Human-readable match report with reasons               │
 │  Tech: Template engine + LLM summary generation                 │
 └─────────────────────────────────────────────────────────────────┘
 ```

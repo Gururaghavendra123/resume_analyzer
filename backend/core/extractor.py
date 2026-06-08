@@ -98,6 +98,28 @@ JD_SCHEMA = """{
 }"""
 
 
+# ── Batch Extraction Prompt ────────────────────────────────────
+
+BATCH_RESUME_EXTRACTION_PROMPT = """You are a precise resume parser. Extract structured information from EACH of the {n} resumes below.
+
+Return ONLY a valid JSON array with exactly {n} objects (one per resume, in the same order).
+No preamble. No explanation. No markdown fences.
+
+Each object must match this schema exactly:
+{schema}
+
+Rules:
+- If a field cannot be determined, use null.
+- For recency: "current" if used in last 12 months, "recent" if 1-3 years, "old" if 3+ years.
+- Calculate total_experience_months from all non-overlapping experience entries.
+- CRITICAL: Extract ATOMIC, single-concept skills. DO NOT extract comma-separated lists as one skill!
+- The output array must have EXACTLY {n} elements.
+
+Resumes (separated by ===RESUME_SEPARATOR===):
+
+{resumes_block}"""
+
+
 # ── Text Extraction from Files ─────────────────────────────────
 
 def extract_text_from_pdf(file_path: str) -> str:
@@ -173,10 +195,18 @@ def safe_json_parse(raw: str) -> dict:
     Parse JSON from LLM output, stripping markdown fences first.
     Raises ExtractionError with the raw response on failure.
     """
-    cleaned = strip_markdown_fences(raw)
+    cleaned = strip_markdown_fences(raw).lstrip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
+        # Fallback: parse the first valid JSON object and ignore trailing extra data
+        try:
+            decoder = json.JSONDecoder()
+            obj, _ = decoder.raw_decode(cleaned)
+            return obj
+        except json.JSONDecodeError:
+            pass
+
         logger.error("JSON parse failed: %s\nRaw response:\n%s", e, raw[:500])
         raise ExtractionError(
             f"LLM returned invalid JSON: {e}",
@@ -189,6 +219,87 @@ def safe_json_parse(raw: str) -> dict:
 def compute_hash(text: str) -> str:
     """SHA256 hash of input text for idempotent caching."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# ── API Key Rotation ───────────────────────────────────
+
+import itertools
+import time
+
+
+class APIKeyRotator:
+    """
+    Round-robin API key rotation with automatic failover.
+
+    If GOOGLE_API_KEYS is set (comma-separated), cycles through them.
+    On a 429/quota error the next key is tried automatically.
+    Falls back to the single GOOGLE_API_KEY if GOOGLE_API_KEYS is empty.
+    """
+
+    def __init__(self, settings: Settings):
+        keys: list[str] = []
+        if settings.google_api_keys:
+            keys = [k.strip() for k in settings.google_api_keys.split(",") if k.strip()]
+        if not keys and settings.google_api_key:
+            keys = [settings.google_api_key]
+        if not keys:
+            raise ExtractionError("No Google API keys configured. Set GOOGLE_API_KEY or GOOGLE_API_KEYS.")
+
+        self._keys = keys
+        self._cycle = itertools.cycle(range(len(keys)))
+        self._current_idx = next(self._cycle)
+        logger.info("API key rotator initialized with %d key(s)", len(keys))
+
+    @property
+    def current_key(self) -> str:
+        return self._keys[self._current_idx]
+
+    def rotate(self) -> str:
+        """Advance to the next key and return it."""
+        self._current_idx = next(self._cycle)
+        logger.info("Rotated to API key #%d / %d", self._current_idx + 1, len(self._keys))
+        return self.current_key
+
+    @property
+    def total_keys(self) -> int:
+        return len(self._keys)
+
+    def configure_current(self):
+        """Configure genai with the current key."""
+        genai.configure(api_key=self.current_key)
+
+    def call_with_rotation(self, model, prompt, max_retries: int = 3):
+        """
+        Call generate_content with auto-rotation on 429 errors.
+        Tries each key once before giving up.
+        """
+        attempts = 0
+        keys_tried = 0
+        last_error = None
+
+        while keys_tried < self.total_keys and attempts < max_retries:
+            self.configure_current()
+            try:
+                response = model.generate_content(prompt)
+                return response
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
+                    logger.warning(
+                        "API key #%d hit rate limit: %s — rotating...",
+                        self._current_idx + 1, str(e)[:120],
+                    )
+                    self.rotate()
+                    keys_tried += 1
+                    attempts += 1
+                    time.sleep(1)  # small cooldown
+                    last_error = e
+                else:
+                    raise  # non-rate-limit error, bubble up
+
+        raise ExtractionError(
+            f"All {self.total_keys} API key(s) exhausted after {attempts} attempts. Last error: {last_error}"
+        )
 
 
 # ── Extractor Classes ─────────────────────────────────────────
@@ -206,7 +317,8 @@ class ResumeExtractor:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._cache: dict[str, ResumeStructured] = {}
-        genai.configure(api_key=settings.google_api_key)
+        self._rotator = APIKeyRotator(settings)
+        self._rotator.configure_current()
         self._model = genai.GenerativeModel(
             settings.extraction_model,
             generation_config=genai.GenerationConfig(
@@ -233,11 +345,13 @@ class ResumeExtractor:
             resume_text=raw_text[:8000],  # Truncate very long resumes
         )
 
-        # Call Gemini
+        # Call Gemini (with key rotation on 429)
         try:
             logger.info("Extracting resume with %s", self._settings.extraction_model)
-            response = self._model.generate_content(prompt)
+            response = self._rotator.call_with_rotation(self._model, prompt)
             raw_response = response.text
+        except ExtractionError:
+            raise
         except Exception as e:
             logger.error("Gemini API call failed: %s", e)
             raise ExtractionError(f"LLM API call failed: {e}") from e
@@ -273,6 +387,106 @@ class ResumeExtractor:
         raw_text = extract_text_from_file(file_path)
         return self.extract(raw_text)
 
+    def batch_extract(self, raw_texts: list[str]) -> list[ResumeStructured]:
+        """
+        Extract structured data from multiple resumes in ONE Gemini API call.
+
+        Packs up to 6 resumes into a single prompt, returning a list of
+        ResumeStructured objects. Falls back to sequential individual extraction
+        per resume if the batch call fails or returns wrong count.
+
+        Saves 5x API calls on bulk uploads compared to sequential extraction.
+        """
+        if not raw_texts:
+            return []
+
+        # Check cache — skip already-cached ones
+        results: list[Optional[ResumeStructured]] = [None] * len(raw_texts)
+        uncached_indices: list[int] = []
+        uncached_texts: list[str] = []
+
+        for i, text in enumerate(raw_texts):
+            text_hash = compute_hash(text)
+            if text_hash in self._cache:
+                logger.debug("Batch: resume %d cache hit", i)
+                results[i] = self._cache[text_hash]
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(text)
+
+        if not uncached_texts:
+            return results  # type: ignore[return-value]
+
+        n = len(uncached_texts)
+        logger.info("Batch extracting %d resumes in one API call", n)
+
+        # Build the combined prompt
+        resumes_block = "\n\n===RESUME_SEPARATOR===\n\n".join(
+            f"[RESUME {i+1}]\n{text[:6000]}" for i, text in enumerate(uncached_texts)
+        )
+        prompt = BATCH_RESUME_EXTRACTION_PROMPT.format(
+            n=n,
+            schema=RESUME_SCHEMA,
+            resumes_block=resumes_block,
+        )
+
+        try:
+            # Use a higher token limit for batch
+            batch_model = genai.GenerativeModel(
+                self._settings.extraction_model,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=16384,
+                )
+            )
+            response = batch_model.generate_content(prompt)
+            raw_response = response.text
+        except Exception as e:
+            logger.warning("Batch extraction API call failed: %s — falling back to sequential", e)
+            # Fallback: extract each resume individually
+            for i, (orig_idx, text) in enumerate(zip(uncached_indices, uncached_texts)):
+                try:
+                    results[orig_idx] = self.extract(text)
+                except Exception as ex:
+                    logger.error("Sequential fallback failed for resume %d: %s", orig_idx, ex)
+                    raise
+            return results  # type: ignore[return-value]
+
+        # Parse the JSON array
+        try:
+            data_list = safe_json_parse(raw_response)
+            if not isinstance(data_list, list):
+                raise ValueError(f"Expected JSON array, got {type(data_list).__name__}")
+            if len(data_list) != n:
+                raise ValueError(f"Expected {n} results, got {len(data_list)}")
+        except Exception as e:
+            logger.warning("Batch JSON parse failed: %s — falling back to sequential", e)
+            for orig_idx, text in zip(uncached_indices, uncached_texts):
+                try:
+                    results[orig_idx] = self.extract(text)
+                except Exception as ex:
+                    logger.error("Sequential fallback failed: %s", ex)
+                    raise
+            return results  # type: ignore[return-value]
+
+        # Validate each parsed item
+        for batch_i, (orig_idx, text) in enumerate(zip(uncached_indices, uncached_texts)):
+            data = data_list[batch_i]
+            data["raw_text"] = text
+            try:
+                structured = ResumeStructured.model_validate(data)
+                self._cache[compute_hash(text)] = structured
+                results[orig_idx] = structured
+                logger.info(
+                    "Batch resume %d: %d skills, %d months exp",
+                    orig_idx + 1, len(structured.skills), structured.total_experience_months,
+                )
+            except Exception as e:
+                logger.warning("Validation failed for batch item %d: %s — falling back", batch_i, e)
+                results[orig_idx] = self.extract(text)  # individual fallback
+
+        return results  # type: ignore[return-value]
+
 
 class JDExtractor:
     """
@@ -287,7 +501,8 @@ class JDExtractor:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._cache: dict[str, JDStructured] = {}
-        genai.configure(api_key=settings.google_api_key)
+        self._rotator = APIKeyRotator(settings)
+        self._rotator.configure_current()
         self._model = genai.GenerativeModel(
             settings.extraction_model,
             generation_config=genai.GenerationConfig(
@@ -314,11 +529,13 @@ class JDExtractor:
             jd_text=raw_text[:8000],
         )
 
-        # Call Gemini
+        # Call Gemini (with key rotation on 429)
         try:
             logger.info("Extracting JD with %s", self._settings.extraction_model)
-            response = self._model.generate_content(prompt)
+            response = self._rotator.call_with_rotation(self._model, prompt)
             raw_response = response.text
+        except ExtractionError:
+            raise
         except Exception as e:
             logger.error("Gemini API call failed: %s", e)
             raise ExtractionError(f"LLM API call failed: {e}") from e
