@@ -203,4 +203,5 @@ Scores are **weighted by role level**:
 
 ## 📝 License
 
-MIT
+MIT 
+done by Gururaghavendra and leksia
