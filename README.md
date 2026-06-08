@@ -51,7 +51,7 @@
 ### Step 1: Clone & Configure
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Gururaghavendra123/resume_analyzer#
 cd resume-jd-analyzer
 
 # Create your environment file
