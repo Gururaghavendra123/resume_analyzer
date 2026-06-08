@@ -1,4 +1,4 @@
-# Resume & JD Analyzer
+# Resume & JD Analyzer..
 
 > **Semantically match resumes to job descriptions with explainable scores.**  
 > ML-powered matching engine using transformer embeddings, skill ontology graphs, and section-weighted scoring.
